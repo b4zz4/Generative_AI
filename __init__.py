@@ -326,7 +326,7 @@ def process_video(input_video_path, output_video_path):
     Image.MAX_IMAGE_PIXELS = None
     import cv2
     import shutil
-    
+
     scene = bpy.context.scene
     movie_x = scene.generate_movie_x
 
@@ -926,6 +926,10 @@ class SEQEUNCER_PT_generate_ai(Panel):  # UI
     bl_region_type = "UI"
     bl_category = "Generative AI"
 
+    @classmethod
+    def poll(cls, context):
+        return context.area.type == 'SEQUENCE_EDITOR'
+
     def draw(self, context):
         preferences = context.preferences
         addon_prefs = preferences.addons[__name__].preferences
@@ -938,24 +942,38 @@ class SEQEUNCER_PT_generate_ai(Panel):  # UI
         input = scene.input_strips
 
         layout = self.layout
-        col = layout.column(align=True)
+        col = layout.column(align=False)
         col.use_property_split = True
         col.use_property_decorate = False
-        col.scale_y = 1.2
-        col.prop(context.scene, "generate_movie_prompt", text="", icon="ADD")
+        col = col.box()
+        col = col.column()
+
+        col.prop(context.scene, "input_strips", text="Input")
+
+        if input == "input_strips":
+            col.prop(context.scene, "image_power", text="Strip Power")
+            if type == "image":
+                col.prop_search(scene, "inpaint_selected_strip", scene.sequence_editor, "sequences", text="Inpaint Mask", icon='SEQ_STRIP_DUPLICATE')
+
+        #layout = self.layout
+        col = col.column(align=True)
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(context.scene, "generate_movie_prompt", text="Prompt", icon="ADD")
 
         if type == "audio" and audio_model_card == "bark":
             pass
         else:
             col.prop(
-                context.scene, "generate_movie_negative_prompt", text="", icon="REMOVE"
-            )
+                context.scene, "generate_movie_negative_prompt", text="Negative Prompt", icon="REMOVE")
 
-        col.prop(context.scene, "generatorai_styles", text="Style")
-
-        layout = self.layout
+        layout = col.column()
         layout.use_property_split = True
         layout.use_property_decorate = False
+        col = layout.column(align=True)
+
+        if type != "audio":
+            col.prop(context.scene, "generatorai_styles", text="Style")
 
         if type == "movie" or type == "image":
             col = layout.column(align=True)
@@ -978,45 +996,51 @@ class SEQEUNCER_PT_generate_ai(Panel):  # UI
             col.prop(context.scene, "movie_num_inference_steps", text="Quality Steps")
             col.prop(context.scene, "movie_num_guidance", text="Word Power")
 
-            col = layout.column()
+            col = col.column()
             row = col.row(align=True)
             sub_row = row.row(align=True)
             sub_row.prop(context.scene, "movie_num_seed", text="Seed")
             row.prop(context.scene, "movie_use_random", text="", icon="QUESTION")
             sub_row.active = not context.scene.movie_use_random
 
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        col = layout.column(align=True)
+        col = col.box()
+
+        col.prop(context.scene, "generatorai_typeselect", text="Output")
+
         if type == "movie" and (
             movie_model_card == "cerspense/zeroscope_v2_dark_30x448x256"
             or movie_model_card == "cerspense/zeroscope_v2_576w"
             or movie_model_card == "cerspense/zeroscope_v2_XL"
         ):
-            col = layout.column(heading="Upscale", align=True)
+            col = col.column(heading="Upscale", align=True)
             col.prop(context.scene, "video_to_video", text="2x")
 
         if type == "image" and (
             image_model_card == "stabilityai/stable-diffusion-xl-base-1.0"
         ):
-            col = layout.column(heading="Refine", align=True)
+            col = col.column(heading="Refine", align=True)
             col.prop(context.scene, "refine_sd", text="Image")
             sub_col = col.row()
             sub_col.active = context.scene.refine_sd
 
-        col = layout.column()
-        col.prop(context.scene, "input_strips", text="Input")
-        if input == "input_strips":
-            col.prop(context.scene, "image_power", text="Strip Power")
-
-        col = layout.column()
-        col.prop(context.scene, "generatorai_typeselect", text="Output")
         col.prop(context.scene, "movie_num_batch", text="Batch Count")
 
+        col = layout.column()
+        col = col.box()
+
         if input == "input_strips":
-            row = layout.row(align=True)
-            row.scale_y = 1.1
+            ed = scene.sequence_editor
+
+            row = col.row(align=True)
+            row.scale_y = 1.2
             row.operator("sequencer.text_to_generator", text="Generate from Strips")
         else:
-            row = layout.row(align=True)
-            row.scale_y = 1.1
+            row = col.row(align=True)
+            row.scale_y = 1.2
             if type == "movie":
                 if movie_model_card == "stabilityai/stable-diffusion-xl-base-1.0":
                     row.operator("sequencer.text_to_generator", text="Generate from Strips")
@@ -1098,12 +1122,13 @@ class SEQUENCER_OT_generate_movie(Operator):
         if (scene.movie_path or scene.image_path) and input == "input_strips":
 
             if movie_model_card == "stabilityai/stable-diffusion-xl-base-1.0": #img2img
-                from diffusers import StableDiffusionXLImg2ImgPipeline
-
+                from diffusers import StableDiffusionXLImg2ImgPipeline, AutoencoderKL
+                vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16, force_upcast=False)
                 pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
                     movie_model_card,
                     torch_dtype=torch.float16,
                     variant="fp16",
+                    vae=vae,
                 )
 
                 from diffusers import DPMSolverMultistepScheduler
@@ -1130,25 +1155,22 @@ class SEQUENCER_OT_generate_movie(Operator):
                 )
 
                 if low_vram:
-                    #refiner.unet.enable_forward_chunking(chunk_size=1, dim=1) #Heavy
+                    refiner.enable_model_cpu_offload()
                     refiner.enable_vae_slicing()
                 else:
                     refiner.to("cuda")
 
-            else:
+            else: #vid2vid
                 if movie_model_card == "cerspense/zeroscope_v2_dark_30x448x256" or movie_model_card == "cerspense/zeroscope_v2_576w" or scene.image_path:
                     card = "cerspense/zeroscope_v2_XL"
-                    safe = False
                 else:
                     card = movie_model_card
-                    safe = True
 
                 from diffusers import VideoToVideoSDPipeline
-
                 upscale = VideoToVideoSDPipeline.from_pretrained(
                     card,
                     torch_dtype=torch.float16,
-                    use_safetensors=safe,
+                    #use_safetensors=True,
                 )
 
                 from diffusers import DPMSolverMultistepScheduler
@@ -1156,9 +1178,9 @@ class SEQUENCER_OT_generate_movie(Operator):
                 upscale.scheduler = DPMSolverMultistepScheduler.from_config(upscale.scheduler.config)
 
                 if low_vram:
-                    torch.cuda.set_per_process_memory_fraction(0.98)
+                    #torch.cuda.set_per_process_memory_fraction(0.98)
                     upscale.enable_model_cpu_offload()
-                    upscale.unet.enable_forward_chunking(chunk_size=1, dim=1) # here:
+                    upscale.unet.enable_forward_chunking(chunk_size=1, dim=1) # heavy:
                     upscale.enable_vae_slicing()
                 else:
                     upscale.to("cuda")
@@ -1166,6 +1188,7 @@ class SEQUENCER_OT_generate_movie(Operator):
         # Models for movie generation
         else:
             from diffusers import TextToVideoSDPipeline
+
             pipe = TextToVideoSDPipeline.from_pretrained(
                 movie_model_card,
                 torch_dtype=torch.float16,
@@ -1615,6 +1638,23 @@ class SEQUENCER_OT_generate_audio(Operator):
         return {"FINISHED"}
 
 
+def find_strip_by_name(scene, name):
+    for sequence in scene.sequence_editor.sequences:
+        if sequence.name == name:
+            return sequence
+    return None
+
+
+def get_strip_path(strip):
+    if strip:
+        strip_dirname = os.path.dirname(strip.directory)
+        image_path = bpy.path.abspath(
+            os.path.join(strip_dirname, strip.elements[0].filename)
+        )
+        return image_path
+    return None
+
+
 class SEQUENCER_OT_generate_image(Operator):
     """Generate Image"""
 
@@ -1655,6 +1695,8 @@ class SEQUENCER_OT_generate_image(Operator):
             torch.cuda.empty_cache()
 
         current_frame = scene.frame_current
+        type = scene.generatorai_typeselect
+        input = scene.input_strips
         prompt = style_prompt(scene.generate_movie_prompt)[0]
         negative_prompt = scene.generate_movie_negative_prompt +", "+ style_prompt(scene.generate_movie_prompt)[1] +", nsfw nude nudity"
         image_x = scene.generate_movie_x
@@ -1668,16 +1710,54 @@ class SEQUENCER_OT_generate_image(Operator):
         preferences = context.preferences
         addon_prefs = preferences.addons[__name__].preferences
         image_model_card = addon_prefs.image_model_card
-        do_refine = (scene.refine_sd or scene.image_path) and image_model_card == "stabilityai/stable-diffusion-xl-base-1.0"
+        do_inpaint = (input == "input_strips" and type == "image" and scene.inpaint_selected_strip)
+        do_refine = False #(scene.refine_sd or scene.image_path) and image_model_card == "stabilityai/stable-diffusion-xl-base-1.0"
 
         # LOADING MODELS
         print("\nModel:  " + image_model_card)
 
-        # Models for stable diffusion
-        if not image_model_card == "DeepFloyd/IF-I-M-v1.0":
+        # models for inpaint
+        if do_inpaint:
 
+            from diffusers import StableDiffusionXLInpaintPipeline, AutoencoderKL
+            from diffusers.utils import load_image
+
+            # clear the VRAM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16, force_upcast=False)
+            pipe = StableDiffusionXLInpaintPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", vae=vae, torch_dtype=torch.float16, variant="fp16", force_upcast=False) #use_safetensors=True
+            if low_vram:
+                #torch.cuda.set_per_process_memory_fraction(0.99)
+                pipe.enable_model_cpu_offload()
+                pipe.enable_vae_slicing()
+            else:
+                pipe.to("cuda")
+
+#            refiner = StableDiffusionXLInpaintPipeline.from_pretrained(
+#                "stabilityai/stable-diffusion-xl-refiner-1.0",
+#                text_encoder_2=pipe.text_encoder_2,
+#                vae = vae,
+#                #vae=pipe.vae,
+#                torch_dtype=torch.float16,
+#                use_safetensors=True,
+#                variant="fp16",
+#            )
+#            if low_vram:
+#                refiner.enable_model_cpu_offload()
+#                refiner.enable_vae_slicing()
+#            else:
+#                refiner.to("cuda")
+
+
+        # Models for stable diffusion
+        elif not image_model_card == "DeepFloyd/IF-I-M-v1.0":
+            from diffusers import AutoencoderKL
+            vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16, force_upcast=False)
             pipe = DiffusionPipeline.from_pretrained(
                 image_model_card,
+                vae=vae,
                 torch_dtype=torch.float16,
                 variant="fp16",
             )
@@ -1747,11 +1827,12 @@ class SEQUENCER_OT_generate_image(Operator):
         # Add refiner model if chosen.
         if do_refine:
             print("Refine Model:  " + "stabilityai/stable-diffusion-xl-refiner-1.0")
-            from diffusers import StableDiffusionXLImg2ImgPipeline
+            from diffusers import StableDiffusionXLImg2ImgPipeline, AutoencoderKL
+            vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16, force_upcast=False)
             refiner = StableDiffusionXLImg2ImgPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-refiner-1.0",
                 text_encoder_2=pipe.text_encoder_2,
-                vae=pipe.vae,
+                vae=vae,
                 torch_dtype=torch.float16,
                 variant="fp16",
             )
@@ -1835,6 +1916,28 @@ class SEQUENCER_OT_generate_image(Operator):
                 ).images
                 # image[0].save("./if_stage_III.png")
                 image = image[0]
+
+            # Inpaint
+            elif do_inpaint:
+                print("Process: Inpaint")
+                img_path = load_image(scene.image_path).convert("RGB")
+
+                mask_strip =find_strip_by_name(scene, scene.inpaint_selected_strip)
+                if not mask_strip:
+                    return
+
+                mask_path = get_strip_path(mask_strip)
+
+                init_image = load_image(img_path).convert("RGB")
+                mask_image = load_image(mask_path).convert("RGB")
+
+                image = pipe(
+                    prompt=prompt,
+                    image=init_image,
+                    mask_image=mask_image,
+                    num_inference_steps=image_num_inference_steps,
+                    strength=1.00 - scene.image_power,
+                ).images[0]
 
             # Img2img
             elif scene.image_path:
@@ -2003,7 +2106,7 @@ class SEQUENCER_OT_strip_to_generatorAI(Operator):
 
                     if len(strips) > 1:
                         styled_prompt = style_prompt(strip_prompt + ", " + prompt)[0]
-                        styled_prompt = style_prompt(strip_prompt + ", " + prompt)[1]
+                        styled_negative_prompt = style_prompt(strip_prompt + ", " + prompt)[1]
                     else:
                         styled_prompt = style_prompt(prompt)[0]
                         styled_negative_prompt = style_prompt(prompt)[1]
@@ -2048,7 +2151,7 @@ class SEQUENCER_OT_strip_to_generatorAI(Operator):
 
                     if len(strips) > 1:
                         styled_prompt = style_prompt(strip_prompt + ", " + prompt)[0]
-                        styled_prompt = style_prompt(strip_prompt + ", " + prompt)[1]
+                        styled_negative_prompt = style_prompt(strip_prompt + ", " + prompt)[1]
                     else:
                         styled_prompt = style_prompt(prompt)[0]
                         styled_negative_prompt = style_prompt(prompt)[1]
@@ -2227,6 +2330,9 @@ def register():
         default="en",
     )
 
+    # Inpaint
+    bpy.types.Scene.inpaint_selected_strip = bpy.props.StringProperty(name="inpaint_selected_strip", default="")
+
     # Upscale
     bpy.types.Scene.video_to_video = bpy.props.BoolProperty(
         name="video_to_video",
@@ -2271,6 +2377,7 @@ def register():
             default="no_style",
         )
 
+
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -2292,6 +2399,7 @@ def unregister():
     del bpy.types.Scene.image_path
     del bpy.types.Scene.refine_sd
     del bpy.types.Scene.generatorai_styles
+    del bpy.types.Scene.inpaint_selected_strip
 
 if __name__ == "__main__":
     unregister()
